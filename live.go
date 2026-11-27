@@ -16,9 +16,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +54,10 @@ type Options struct {
 	// Compress offers permessage-deflate: less bandwidth, more CPU on both ends.
 	Compress bool
 }
+
+// ErrRefused: the server answered the connection with HTTP 401, the key is refused. Reconnecting
+// would only repeat it, so Next returns it (wrapped) instead of retrying.
+var ErrRefused = errors.New("probnode: the key is refused (HTTP 401)")
 
 // Client is one connection.
 type Client struct {
@@ -95,8 +99,13 @@ func (c *Client) dial(ctx context.Context) (*websocket.Conn, error) {
 	if c.opt.Compress {
 		mode = websocket.CompressionNoContextTakeover
 	}
-	conn, _, err := websocket.Dial(ctx, c.url, &websocket.DialOptions{HTTPHeader: h, CompressionMode: mode})
+	conn, resp, err := websocket.Dial(ctx, c.url, &websocket.DialOptions{HTTPHeader: h, CompressionMode: mode})
 	if err != nil {
+		// Decided by the HTTP status, never by the error's text: a transport error names the
+		// connection's addresses, and a port like 40122 contains "401".
+		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
+			return nil, fmt.Errorf("%w: %v", ErrRefused, err)
+		}
 		return nil, err
 	}
 	conn.SetReadLimit(64 << 20)
@@ -159,7 +168,7 @@ func (c *Client) resume(ctx context.Context, lost time.Time) error {
 			c.mu.Unlock()
 			break
 		}
-		if strings.Contains(err.Error(), "401") { // the key is refused: retrying repeats it
+		if errors.Is(err, ErrRefused) { // the key is refused: retrying repeats it
 			return err
 		}
 		select {
@@ -258,9 +267,10 @@ func (c *Client) Close() error {
 	return conn.Close(websocket.StatusNormalClosure, "")
 }
 
-// isClientClose: the server refused us on purpose (policy / a bad request), so reconnecting
-// would only repeat it.
+// isClientClose: the server refused us on purpose (policy / a bad request, or the key at dial),
+// so reconnecting would only repeat it. Anything else on a live connection - a reset, an EOF,
+// a cut frame - is a drop. Decided by the close status and ErrRefused, never by the error's text.
 func isClientClose(err error) bool {
 	s := websocket.CloseStatus(err)
-	return s == websocket.StatusPolicyViolation || s == websocket.StatusUnsupportedData || strings.Contains(err.Error(), "401")
+	return s == websocket.StatusPolicyViolation || s == websocket.StatusUnsupportedData || errors.Is(err, ErrRefused)
 }
