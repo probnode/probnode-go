@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 - 2026-11-28
 
 - Fix: with `Reconnect`, a dropped connection whose error text contained "401" (for example a TCP
   reset naming a port like 40122) was taken for a refused key and ended the stream instead of
